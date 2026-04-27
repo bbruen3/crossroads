@@ -79,6 +79,33 @@ async def chat_completions(request: Request):
     
     body = await request.json()
     model_id = body.get("model", "")
+    messages = body.get("messages", [])
+    
+    # Separate system, history, and current message
+    system_messages = [m for m in messages if m["role"] == "system"]
+    history = [m for m in messages if m["role"] != "system"]
+    current_message = history[-1]["content"] if history else ""
+    conversation_history = history[:-1]
+    
+    base_system = system_messages[0]["content"] if system_messages else ""
+    
+    # Build CrossroadsRequest
+    from app.models import CrossroadsRequest
+    cr = CrossroadsRequest(
+        original_messages=messages,
+        current_message=current_message,
+        conversation_history=conversation_history,
+        model_requested=model_id,
+        parameters={k: v for k, v in body.items() if k not in ("model", "messages")},
+        enriched_system=base_system,
+    )
+    
+    # Run always-on middleware
+    from app.middleware.datetime_inject import inject_datetime
+    from app.middleware.fingerprint import fingerprint_request
+    
+    cr = await inject_datetime(cr, cfg)
+    cr = await fingerprint_request(cr)
     
     # Parse service prefix
     parts = model_id.split("/", 1)
@@ -87,17 +114,21 @@ async def chat_completions(request: Request):
     
     service_name, model_name = parts[0], parts[1]
     
-    # Find service config
     service = next(
         (s for s in cfg.get("model_services", []) if s["name"] == service_name),
         None
     )
-    
     if not service:
         return JSONResponse({"error": f"Unknown service: {service_name}"}, status_code=404)
     
-    # Forward request with original model name (no prefix)
-    forward_body = {**body, "model": model_name}
+    # Reassemble messages with enriched system
+    forward_messages = []
+    if cr.enriched_system:
+        forward_messages.append({"role": "system", "content": cr.enriched_system})
+    forward_messages.extend(cr.conversation_history)
+    forward_messages.append({"role": "user", "content": cr.current_message})
+    
+    forward_body = {**body, "model": model_name, "messages": forward_messages}
     
     headers = {"Content-Type": "application/json"}
     api_key = service.get("api_key", "")
