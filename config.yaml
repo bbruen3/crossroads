@@ -1,0 +1,111 @@
+global_system_prompt: |
+  You are a helpful assistant with access to real-time information and tools.
+  Be concise and accurate.
+
+datetime:
+  timezone: America/New_York
+
+model_services:
+  - name: omlx
+    base_url: http://host.docker.internal:8001/v1
+    api_key: ${OMLX_API_KEY}
+    type: openai_compatible
+    exposed_models: all_models
+
+  - name: ollama
+    base_url: http://host.docker.internal:11434/v1
+    api_key: ollama
+    type: openai_compatible
+    exposed_models: all_models
+
+  - name: anthropic
+    base_url: https://api.anthropic.com/v1
+    api_key: ${ANTHROPIC_API_KEY}
+    type: openai_compatible
+    exposed_models:
+      - claude-sonnet-4-5
+      - claude-opus-4-5
+
+  - name: openrouter
+    base_url: https://openrouter.ai/api/v1
+    api_key: ${OPENROUTER_API_KEY}
+    type: openai_compatible
+    exposed_models: 
+      - openai/gpt-oss-120b:free
+      - google/gemma-4-31b-it:free
+      - deepseek/deepseek-v4-flash
+
+auth:
+  allow_localhost_unauthenticated: true
+  api_keys: []
+
+model_cache:
+  ttl_seconds: 300
+  refresh_on_startup: true
+
+routing_rules:
+  default_model:
+    service: omlx
+    model: ${DEFAULT_MODEL}
+  code_model:
+    service: omlx
+    model: ${CODE_MODEL}
+  reasoning_model:
+    service: omlx
+    model: ${REASONING_MODEL}
+  simple_model:
+    service: omlx
+    model: ${SIMPLE_MODEL}
+  fallback_model:
+    service: ollama
+    model: llama3.2-3b
+
+classification:
+  hard_rules_enabled: true
+  confidence_threshold: 0.7
+  hard_reject_threshold: 0.3
+  low_confidence_top_n: 2
+  always_include_web_search: true
+
+context_budgets:
+  hindsight_budget_tokens: 500
+  system_budget_tokens: 500
+  candidate_budget_tokens: 2000
+  high_confidence_threshold: 0.8
+
+history:
+  preserve_first_n_turns: 2
+  max_tokens: 8000
+  trimming_strategy: hindsight
+  fallback_strategy: token_budget
+  hard_cap_turns: 50
+
+cache:
+  redis_url: redis://tracearr-redis:6379
+  stale_threshold_percent: 10
+  max_entries: 10000
+
+task_model:
+  model: gemma4-2b
+  min_free_ram_gb: 8
+  fallback_to_loaded: true
+
+merger:
+  exact_dedup: true
+  semantic_dedup: true
+  semantic_dedup_threshold: 0.85
+
+scoring:
+  pipe_confidence_weight: 0.3
+  relevance_weight: 0.7
+
+pipe_defaults:
+  timeout_seconds: 10
+  retry_attempts: 1
+  retry_delay_seconds: 1
+
+logging:
+  json_file: ./logs/crossroads.log
+  max_size_mb: 100
+  retention_days: 30
+  prometheus_enabled: false

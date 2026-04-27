@@ -1,0 +1,26 @@
+services:
+  crossroads:
+    build: .
+    container_name: crossroads
+    restart: unless-stopped
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./config.yaml:/app/config.yaml
+      - ./pipes:/app/pipes
+      - ./logs:/app/logs
+      - ./app:/app/app
+    environment:
+      - OMLX_API_KEY=${OMLX_API_KEY}
+      - DEFAULT_MODEL=${DEFAULT_MODEL}
+      - CODE_MODEL=${CODE_MODEL}
+      - REASONING_MODEL=${REASONING_MODEL}
+      - SIMPLE_MODEL=${SIMPLE_MODEL}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - docker_master_net
+
+networks:
+  docker_master_net:
+    external: true
