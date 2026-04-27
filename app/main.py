@@ -103,7 +103,8 @@ async def chat_completions(request: Request):
     # Run always-on middleware
     from app.middleware.datetime_inject import inject_datetime
     from app.middleware.fingerprint import fingerprint_request
-    
+    from app.middleware.hindsight import recall as hindsight_recall
+    cr = await hindsight_recall(cr, cfg)
     cr = await inject_datetime(cr, cfg)
     cr = await fingerprint_request(cr)
     
@@ -140,8 +141,10 @@ async def chat_completions(request: Request):
     
     if is_streaming:
         from fastapi.responses import StreamingResponse
+        import asyncio
         
         async def stream_generator():
+            buffer = []
             async with httpx.AsyncClient() as client:
                 async with client.stream(
                     "POST",
@@ -151,18 +154,26 @@ async def chat_completions(request: Request):
                     timeout=120.0
                 ) as resp:
                     async for chunk in resp.aiter_bytes():
+                        buffer.append(chunk)
                         yield chunk
+            
+            # Outlet: extract memories after stream completes
+            try:
+                from app.middleware.hindsight import extract as hindsight_extract
+                full_response = b"".join(buffer).decode("utf-8", errors="ignore")
+                # Extract assistant content from SSE chunks
+                import re
+                content_parts = re.findall(r'"content":"(.*?)"', full_response)
+                assistant_text = "".join(content_parts).replace("\\n", "\n")
+                if assistant_text:
+                    conv_id = cr.parameters.get("conversation_id", "unknown")
+                    asyncio.create_task(
+                        hindsight_extract(cr.current_message, assistant_text, conv_id, cfg)
+                    )
+            except Exception as e:
+                print(f"DEBUG outlet error: {e}")
         
         return StreamingResponse(
             stream_generator(),
             media_type="text/event-stream"
         )
-    else:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{base_url}/chat/completions",
-                json=forward_body,
-                headers=headers,
-                timeout=120.0
-            )
-            return JSONResponse(content=resp.json(), status_code=resp.status_code)

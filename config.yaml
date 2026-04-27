@@ -109,3 +109,7 @@ logging:
   max_size_mb: 100
   retention_days: 30
   prometheus_enabled: false
+
+hindsight:
+  recall_top_k: 10
+  extract_enabled: true
