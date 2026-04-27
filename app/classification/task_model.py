@@ -95,17 +95,93 @@ def classify_turn_worth_extracting(
         return False
 
 
+INTENT_CATEGORIES = [
+    "web_search", "weather", "news", "wikipedia", "academic", "financial",
+    "legal", "sports", "github", "huggingface", "packages", "docker",
+    "stackoverflow", "security", "music_query", "music_action", "media_query",
+    "media_action", "homelab", "notify", "calendar_query", "calendar_action",
+    "send_message", "multi_intent", "memory_sufficient", "conversational",
+    "code", "reasoning", "creative",
+]
+
+INTENT_PROMPT = """Classify the user message into one or more intents and extract entities.
+
+Available intents: {intents}
+
+Rules:
+- Choose the most specific intent(s) that apply
+- Use "conversational" for greetings, acknowledgments, small talk
+- Use "memory_sufficient" if the question can be answered from personal context alone
+- Use "multi_intent" if the message clearly requests multiple distinct things
+- confidence: 0.0-1.0 reflecting how certain you are
+
+Return ONLY a JSON object:
+{{"primary": "intent_name", "secondary": [], "entities": {{}}, "confidence": 0.0, "requires_action": false, "action_type": "", "model_hint": "default"}}
+
+model_hint options: "default", "code", "reasoning", "simple"
+
+User message: {message}
+
+JSON:"""
+
+
 def classify_intent(message: str, config: dict) -> dict:
     """
-    Classify the intent of a user message.
+    Use the task model to classify user intent.
     Returns structured intent dict.
-    Stub -- full implementation in Component 3.
     """
-    return {
-        "primary": "conversational",
-        "confidence": 0.5,
-        "secondary": [],
-        "entities": {},
-        "requires_action": False,
-        "model_hint": "default",
-    }
+    try:
+        base_url, model_name, api_key = _get_task_model_config(config)
+    except ValueError as e:
+        logging.warning(f"Task model config error: {e}")
+        return {
+            "primary": "web_search",
+            "confidence": 0.3,
+            "secondary": [],
+            "entities": {},
+            "requires_action": False,
+            "action_type": "",
+            "model_hint": "default",
+        }
+    
+    prompt = INTENT_PROMPT.format(
+        intents=", ".join(INTENT_CATEGORIES),
+        message=message[:500]
+    )
+    
+    try:
+        result = _post(
+            f"{base_url}/chat/completions",
+            {
+                "model": model_name,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 200,
+                "temperature": 0.1,
+                "stream": False,
+            },
+            api_key=api_key,
+        )
+        
+        content = result["choices"][0]["message"]["content"].strip()
+        
+        # Strip markdown fences
+        if content.startswith("```"):
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+        
+        parsed = json.loads(content.strip())
+        logging.info(f"Intent classification: {parsed.get('primary')} ({parsed.get('confidence', 0):.2f})")
+        return parsed
+        
+    except Exception as e:
+        logging.warning(f"Intent classification error: {e}")
+        return {
+            "primary": "web_search",
+            "confidence": 0.3,
+            "secondary": [],
+            "entities": {},
+            "requires_action": False,
+            "action_type": "",
+            "model_hint": "default",
+        }

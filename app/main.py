@@ -101,11 +101,10 @@ async def chat_completions(request: Request):
     history = [m for m in messages if m["role"] != "system"]
     current_message = history[-1]["content"] if history else ""
     conversation_history = history[:-1]
-    
     base_system = system_messages[0]["content"] if system_messages else ""
 
+    # OWUI internal task -- skip all middleware, pass through directly
     if any(current_message.strip().startswith(p) for p in OWUI_TASK_PATTERNS):
-        # OWUI internal task -- skip all middleware, pass through directly
         parts = model_id.split("/", 1)
         if len(parts) == 2:
             service_name, model_name = parts
@@ -129,8 +128,17 @@ async def chat_completions(request: Request):
                         resp = await client.post(f"{service['base_url']}/chat/completions", json=forward_body, headers=headers, timeout=120.0)
                         return JSONResponse(content=resp.json(), status_code=resp.status_code)
 
+    # Parse service prefix early -- needed for routing
+    parts = model_id.split("/", 1)
+    if len(parts) != 2:
+        return JSONResponse({"error": f"Invalid model format: {model_id}"}, status_code=400)
+    service_name, model_name = parts[0], parts[1]
+    service = next((s for s in cfg.get("model_services", []) if s["name"] == service_name), None)
+    if not service:
+        return JSONResponse({"error": f"Unknown service: {service_name}"}, status_code=404)
+
     # Build CrossroadsRequest
-    from app.models import CrossroadsRequest
+    from app.models import CrossroadsRequest, Intent
     cr = CrossroadsRequest(
         original_messages=messages,
         current_message=current_message,
@@ -139,30 +147,35 @@ async def chat_completions(request: Request):
         parameters={k: v for k, v in body.items() if k not in ("model", "messages")},
         enriched_system="",
     )
-    
-    # Run always-on middleware
+
+    # Component 2: Always-on middleware
     from app.middleware.datetime_inject import inject_datetime
     from app.middleware.fingerprint import fingerprint_request
     from app.middleware.hindsight import recall as hindsight_recall
     cr = await hindsight_recall(cr, cfg)
     cr = await inject_datetime(cr, cfg)
     cr = await fingerprint_request(cr)
-    
-    # Parse service prefix
-    parts = model_id.split("/", 1)
-    if len(parts) != 2:
-        return JSONResponse({"error": f"Invalid model format: {model_id}"}, status_code=400)
-    
-    service_name, model_name = parts[0], parts[1]
-    
-    service = next(
-        (s for s in cfg.get("model_services", []) if s["name"] == service_name),
-        None
-    )
-    if not service:
-        return JSONResponse({"error": f"Unknown service: {service_name}"}, status_code=404)
-    
-    # Reassemble -- memories first, then OWUI system prompt
+
+    # Component 3: Intent classification
+    from app.classification.hard_rules import classify as hard_classify
+    from app.classification.task_model import classify_intent
+    intent = hard_classify(cr.current_message)
+    if intent is None:
+        intent_dict = classify_intent(cr.current_message, cfg)
+        intent = Intent(
+            primary=intent_dict.get("primary", "web_search"),
+            secondary=intent_dict.get("secondary", []),
+            entities=intent_dict.get("entities", {}),
+            confidence=intent_dict.get("confidence", 0.3),
+            requires_action=intent_dict.get("requires_action", False),
+            action_type=intent_dict.get("action_type", ""),
+            skip_pipes=intent_dict.get("primary") in ("conversational", "memory_sufficient"),
+            model_hint=intent_dict.get("model_hint", "default"),
+        )
+    logging.info(f"Intent: {intent.primary} (confidence={intent.confidence:.2f}, skip_pipes={intent.skip_pipes})")
+    cr.user_context["intent"] = intent
+
+    # Reassemble messages -- memories first, then OWUI system prompt
     forward_messages = []
     system_parts = []
     if cr.enriched_system:
@@ -173,25 +186,24 @@ async def chat_completions(request: Request):
         forward_messages.append({"role": "system", "content": "\n\n".join(system_parts)})
     forward_messages.extend(cr.conversation_history)
     forward_messages.append({"role": "user", "content": cr.current_message})
-    
+
     logging.info(f"Forward system prompt length: {len(forward_messages[0]['content']) if forward_messages and forward_messages[0]['role'] == 'system' else 0}")
     logging.info(f"Forward system preview: {forward_messages[0]['content'][:200] if forward_messages and forward_messages[0]['role'] == 'system' else 'NO SYSTEM'}")
-    logging.info(f"Full system prompt:\n{forward_messages[0]['content']}")
 
     forward_body = {**body, "model": model_name, "messages": forward_messages}
-    
+
     headers = {"Content-Type": "application/json"}
     api_key = service.get("api_key", "")
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    
+
     base_url = service["base_url"]
     is_streaming = body.get("stream", False)
-    
+
     if is_streaming:
         from fastapi.responses import StreamingResponse
         import asyncio
-        
+
         async def stream_generator():
             buffer = []
             async with httpx.AsyncClient() as client:
@@ -205,7 +217,7 @@ async def chat_completions(request: Request):
                     async for chunk in resp.aiter_bytes():
                         buffer.append(chunk)
                         yield chunk
-            
+
             # Outlet: extract memories after stream completes
             try:
                 from app.middleware.hindsight import extract as hindsight_extract
@@ -227,7 +239,7 @@ async def chat_completions(request: Request):
                         logging.info("Outlet: skipping extraction -- not worth storing")
             except Exception as e:
                 logging.debug(f"outlet error: {e}")
-        
+
         return StreamingResponse(
             stream_generator(),
             media_type="text/event-stream"
