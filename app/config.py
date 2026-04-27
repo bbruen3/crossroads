@@ -1,12 +1,18 @@
 import yaml
 import os
 import re
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S"
+)
 
 CONFIG_PATH = "/app/config.yaml"
 
-print(f"DEBUG config.py loaded, CONFIG_PATH={CONFIG_PATH}")
-print(f"DEBUG file exists: {os.path.exists(CONFIG_PATH)}")
-print(f"DEBUG /app contents: {os.listdir('/app')}")
+logging.debug("config.py loaded, CONFIG_PATH={CONFIG_PATH}")
+logging.debug("file exists: {os.path.exists(CONFIG_PATH)}")
+logging.debug("/app contents: {os.listdir('/app')}")
 
 def _expand_env_vars(value):
     if isinstance(value, str):
@@ -24,7 +30,7 @@ _config_cache = None
 def get_config() -> dict:
     global _config_cache
     if _config_cache is None:
-        print(f"DEBUG attempting open: {CONFIG_PATH}")
+        logging.debug("attempting open: {CONFIG_PATH}")
         with open(CONFIG_PATH) as f:
             raw = yaml.safe_load(f)
         _config_cache = _expand_env_vars(raw)

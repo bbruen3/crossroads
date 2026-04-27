@@ -1,76 +1,79 @@
-import httpx
+import urllib.request
+import urllib.error
+import json
 from datetime import datetime, timezone
 from app.models import CrossroadsRequest
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S"
+)
 
 HINDSIGHT_BASE = "http://hindsight:8888"
 BANK_ID = "bbruen3"
 RECALL_URL = f"{HINDSIGHT_BASE}/v1/default/banks/{BANK_ID}/memories/recall"
 RETAIN_URL = f"{HINDSIGHT_BASE}/v1/default/banks/{BANK_ID}/memories"
 
-# Relevance score threshold for high vs low confidence memories
-HIGH_CONFIDENCE_THRESHOLD = 0.75
+
+def _post(url: str, payload: dict, timeout: int = 10) -> dict:
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        url, data=data, headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
 
 
 async def recall(request: CrossroadsRequest, config: dict) -> CrossroadsRequest:
-    """Query Hindsight for relevant memories and inject into request context."""
+    logging.info(f"Hindsight recall: querying for '{request.current_message[:50]}'")
     hindsight_cfg = config.get("hindsight", {})
     top_k = hindsight_cfg.get("recall_top_k", 10)
     
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(
-                RECALL_URL,
-                json={"query": request.current_message, "top_k": top_k}
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        data = _post(RECALL_URL, {"query": request.current_message, "top_k": top_k})
     except Exception as e:
-        print(f"DEBUG hindsight recall error: {e}")
+        import traceback
+        logging.debug("hindsight recall type: {type(e).__name__}")
+        logging.debug("hindsight recall repr: {repr(e)}")
+        traceback.print_exc()
         return request
     
     results = data.get("results", [])
+    logging.info(f"Hindsight recall: got {len(results)} results")
     if not results:
         return request
     
-    # Deduplicate by text content
-    seen_texts = set()
-    unique_results = []
+    # Deduplicate by text
+    seen = set()
+    unique = []
     for r in results:
         text = r.get("text", "").strip()
-        if text and text not in seen_texts:
-            seen_texts.add(text)
-            unique_results.append(r)
+        if text and text not in seen:
+            seen.add(text)
+            unique.append(r)
     
-    # Split into high and low confidence based on type
-    # world/experience types tend to be more synthesized and reliable
-    high_confidence = []
-    low_confidence = []
+    # Split high/low confidence by type
+    high = [r for r in unique if r.get("type") in ("world", "experience")]
+    low = [r for r in unique if r.get("type") not in ("world", "experience")]
     
-    for r in unique_results:
-        memory_type = r.get("type", "")
-        if memory_type in ("world", "experience"):
-            high_confidence.append(r)
-        else:
-            low_confidence.append(r)
+    logging.info(f"Hindsight: {len(high)} high confidence, {len(low)} low confidence memories")
+    logging.info(f"Hindsight high sample: {[r['text'][:50] for r in high[:3]]}")
+
+    if high:
+        lines = [f"- {r['text']}" for r in high]
+        block = "## Memory\n" + "\n".join(lines)
+        request.enriched_system = (request.enriched_system + f"\n\n{block}").strip()
+        logging.info(f"Hindsight: injected {len(high)} memories into system prompt")
+        logging.info(f"Hindsight system prompt length: {len(request.enriched_system)}")
     
-    # Build high confidence block for system prompt
-    if high_confidence:
-        memory_lines = [f"- {r['text']}" for r in high_confidence]
-        memory_block = "## Memory\n" + "\n".join(memory_lines)
-        request.enriched_system = (request.enriched_system + f"\n\n{memory_block}").strip()
-    
-    # Add low confidence to candidate context
-    for r in low_confidence:
+    for r in low:
         request.candidate_context.append({
             "source": "hindsight",
             "text": r["text"],
             "type": r.get("type"),
             "context": r.get("context"),
         })
-    
-    # If memories are sufficient to answer without pipes, flag it
-    # Simple heuristic: if we have high confidence memories, let classification decide
-    # Don't set memory_sufficient here -- leave that to classification layer
     
     return request
 
@@ -81,15 +84,11 @@ async def extract(
     conversation_id: str,
     config: dict
 ) -> None:
-    """Extract and retain memories from a completed conversation turn."""
     hindsight_cfg = config.get("hindsight", {})
-    
     if not hindsight_cfg.get("extract_enabled", True):
         return
     
-    # Build content from the turn
     content = f"User: {user_message}\nAssistant: {assistant_response}"
-    
     item = {
         "content": content,
         "document_id": f"turn_{conversation_id}_{int(datetime.now(timezone.utc).timestamp())}",
@@ -99,11 +98,6 @@ async def extract(
     }
     
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                RETAIN_URL,
-                json={"items": [item], "async": True}
-            )
-            resp.raise_for_status()
+        _post(RETAIN_URL, {"items": [item], "async": True}, timeout=30)
     except Exception as e:
-        print(f"DEBUG hindsight extract error: {e}")
+        logging.debug("hindsight extract error: {e}")
