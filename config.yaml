@@ -86,7 +86,8 @@ cache:
   max_entries: 10000
 
 task_model:
-  model: gemma4-2b
+  model: gemma-4-E4B-it-UD-MLX-4bit
+  service: omlx
   min_free_ram_gb: 8
   fallback_to_loaded: true
 

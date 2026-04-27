@@ -14,6 +14,8 @@ OWUI_TASK_PATTERNS = [
     "### Task:\nGenerate a title",
     "### Task:\nCreate a concise",
     "### Task:\nRespond to the user",
+    "### Task:\nGenerate 1-3",
+    "### Task:\nGenerate a concise",
 ]
 
 app = FastAPI(title="Crossroads", version="0.1.0")
@@ -205,20 +207,26 @@ async def chat_completions(request: Request):
                         yield chunk
             
             # Outlet: extract memories after stream completes
-            #try:
-            #    from app.middleware.hindsight import extract as hindsight_extract
-            #    full_response = b"".join(buffer).decode("utf-8", errors="ignore")
-            #    # Extract assistant content from SSE chunks
-            #    import re
-            #    content_parts = re.findall(r'"content":"(.*?)"', full_response)
-            #    assistant_text = "".join(content_parts).replace("\\n", "\n")
-            #    if assistant_text:
-            #        conv_id = cr.parameters.get("conversation_id", "unknown")
-            #        asyncio.create_task(
-            #            hindsight_extract(cr.current_message, assistant_text, conv_id, cfg)
-            #        )
-            #except Exception as e:
-            #    logging.debug(f"outlet error: {e}")
+            try:
+                from app.middleware.hindsight import extract as hindsight_extract
+                from app.classification.task_model import classify_turn_worth_extracting
+                full_response = b"".join(buffer).decode("utf-8", errors="ignore")
+                import re
+                content_parts = re.findall(r'"content":"(.*?)"', full_response)
+                assistant_text = "".join(content_parts).replace("\\n", "\n")
+                if assistant_text:
+                    worth_extracting = classify_turn_worth_extracting(
+                        cr.current_message, assistant_text, cfg
+                    )
+                    if worth_extracting:
+                        conv_id = cr.parameters.get("conversation_id", "unknown")
+                        asyncio.create_task(
+                            hindsight_extract(cr.current_message, assistant_text, conv_id, cfg)
+                        )
+                    else:
+                        logging.info("Outlet: skipping extraction -- not worth storing")
+            except Exception as e:
+                logging.debug(f"outlet error: {e}")
         
         return StreamingResponse(
             stream_generator(),
